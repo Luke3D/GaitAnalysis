@@ -107,8 +107,8 @@ class FeatureExtractor:
 
 
 class Normalizer:
-    def __init__(self):
-        self.mu = 0; self.sigma = 1
+    def __init__(self, mu=0, sigma=1):
+        self.mu, self.sigma = mu, sigma
 
     def zscore(self, df, exclude=None):
 #         df = df.select_dtypes(include='number').copy()
@@ -143,40 +143,48 @@ class Normalizer:
 
 
 class FilterData:
-    def __init__(self):
-        pass #can later define filters to use
+    def __init__(self, p_cutoff=0.6):
+        self.p_cutoff = p_cutoff
 
     def get_filterdata(self, poses, joints=None):
         df = poses.get_joint_data(joints)
         dfout = pd.DataFrame(columns=joints)
 
         for j in joints:
-            s = (df.loc[:,(j,['x'])]).copy()
+            s = (df.loc[:,(j,['x','likelihood'])]).copy()
             s.columns = s.columns.droplevel(0)
-            s = s.x #use x-trajectory
+            s.loc[s.likelihood < self.p_cutoff,'x'] = np.nan
+            s.interpolate(method='spline', order=3, inplace=True)
+            x = s.x #use x-trajectory
 
             #high pass filter
             sos_filt = butter(8, 0.25, 'highpass', fs=30, output='sos')
-            x = sosfiltfilt(sos_filt,s.values)
-            s_filt = pd.Series(data=x, index=s.index)
-            s = s_filt.copy()
+            x_filt = sosfiltfilt(sos_filt,x.values)
+            x_filt = pd.Series(data=x_filt, index=x.index)
+            x = x_filt.copy()
 
             #zscore and remove outliers
             NZ = Normalizer()
-            s = NZ.zscore(s)
-            sz = NZ.removeOutliers(s,interp=True)
+            x_filt_z = NZ.zscore(x)
+            x_filt_z = NZ.removeOutliers(x_filt_z,interp=True)
+            x = x_filt_z.copy()
 
             #interpolate with savgol filter to remove unwanted highfreq jumps
-            x = signal.savgol_filter(sz.values, 15, 3)
-            pd.Series(data=x, index=sz.index)
+            try:
+                x_savgol = signal.savgol_filter(x.values, 15, 3)
+                x_savgol = pd.Series(data=x_savgol, index=x.index)
+                x = x_savgol.copy()
+            except:
+                print('savgol filter fit failed')
 
             #remove detection noise with median filter
-            szf = sz.rolling(4, center=True).median().interpolate().dropna()
+            # szf = x.rolling(4, center=True).median().interpolate().dropna()
+            # x = szf.copy()
             # szf = sz.rolling(10, center=True).mean().interpolate().dropna()
             # szf = sz.rolling(10, center=True).median().rolling(10, center=True).mean().interpolate().dropna()
-            szf.plot(alpha=.5)
+            # szf.plot(alpha=.5)
 
-            dfout[j]=szf
+            dfout[j]=x
 
         return dfout
 
