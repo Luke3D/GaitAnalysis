@@ -5,7 +5,7 @@ import seaborn as sns
 from pathlib import Path
 from scipy import stats, signal
 from scipy.signal import decimate, butter, sosfiltfilt, find_peaks, savgol_filter
-
+from statsmodels.nonparametric.smoothers_lowess import lowess
 import itertools
 import os
 import matplotlib
@@ -59,11 +59,11 @@ class AnalyzePoses:
             if axis=='y':
                 axes[i].invert_yaxis()
             axes[i].scatter(x='t',y=axis, c='likelihood', cmap='cool', data=df_i, marker='^', alpha=.5, s=10)
-            df_i.plot(x='t',y=axis, alpha=.5, ax=axes[i])
+            # df_i.plot(x='t',y=axis, alpha=.5, ax=axes[i])
             if showX is True and axis=='y':
                 ax2 = axes[i].twinx()
                 ax2.scatter(x='t',y='x', c='likelihood', cmap='cool', data=df_i, marker='x', alpha=.5)
-                df_i.plot(x='t',y='x', alpha=.5, ax=ax2, c='blue')
+                # df_i.plot(x='t',y='x', alpha=.5, ax=ax2, c='blue')
 
             axes[i].set_xlabel('Time [s]')
             axes[i].set_ylabel('Position [px]')
@@ -72,8 +72,17 @@ class AnalyzePoses:
             if xlim is not None:
                 axes[i].set_xlim(xlim)
 
+            #filters
+            y = df_i[axis]; t = df_i['t']
+            y_lowess = lowess(y, t, frac=30/len(y), it=2)
+            y_savgol = signal.savgol_filter(y, 15, 3)
+            # axes[i].plot(y_lowess[:,0], y_lowess[:,1], label='lowess', c='orange')
+            axes[i].plot(t, y_savgol, c='r', label='Savgol', alpha=.5)
+
+
         plt.suptitle(posedata.filename.strip('.h5'), fontsize=15, y=1.0)
         plt.tight_layout()
+
 
         if savepath is not None:
             plt.savefig(os.path.join(savepath+posedata.filename.strip('.h5'))+'.jpg', dpi=300)
@@ -156,6 +165,7 @@ class FilterData:
             s.loc[s.likelihood < self.p_cutoff,'x'] = np.nan
             s.interpolate(method='spline', order=3, inplace=True)
             x = s.x #use x-trajectory
+            x.dropna(inplace=True)
 
             #high pass filter
             sos_filt = butter(8, 0.25, 'highpass', fs=30, output='sos')
@@ -170,12 +180,18 @@ class FilterData:
             x = x_filt_z.copy()
 
             #interpolate with savgol filter to remove unwanted highfreq jumps
-            try:
-                x_savgol = signal.savgol_filter(x.values, 15, 3)
-                x_savgol = pd.Series(data=x_savgol, index=x.index)
-                x = x_savgol.copy()
-            except:
-                print('savgol filter fit failed')
+            # try:
+            #     x_savgol = signal.savgol_filter(x.values, 15, 3)
+            #     x_savgol = pd.Series(data=x_savgol, index=x.index)
+            #     x = x_savgol.copy()
+            # except:
+            #     print('savgol filter fit failed')
+
+
+            # x_lowess = lowess(x.values, s.index.values, frac=30/len(x), it=2)
+            # x_lowess = pd.Series(data=x_lowess[:,1], index=x_lowess[:,0])
+            # x = x_lowess.copy()
+
 
             #remove detection noise with median filter
             # szf = x.rolling(4, center=True).median().interpolate().dropna()
