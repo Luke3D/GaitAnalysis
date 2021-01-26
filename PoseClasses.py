@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import cv2
+import re, json
 from pathlib import Path
 from scipy import stats, signal
 from scipy.signal import decimate, butter, sosfiltfilt, find_peaks, savgol_filter
@@ -45,7 +47,8 @@ class AnalyzePoses:
     def __init__(self, joints):
         self.joints = joints
 
-    def plot_joints(self, posedata, savepath=None, axis='y', showX=False, xlim=None):
+    #plot raw data for each joint
+    def plot_joints(self, posedata, savepath=None, axis='x', showX=False, xlim=None):
 
         #plot time-series for each joint
         Nj = len(self.joints)
@@ -63,7 +66,6 @@ class AnalyzePoses:
             if showX is True and axis=='y':
                 ax2 = axes[i].twinx()
                 ax2.scatter(x='t',y='x', c='likelihood', cmap='cool', data=df_i, marker='x', alpha=.5)
-                # df_i.plot(x='t',y='x', alpha=.5, ax=ax2, c='blue')
 
             axes[i].set_xlabel('Time [s]')
             axes[i].set_ylabel('Position [px]')
@@ -72,21 +74,109 @@ class AnalyzePoses:
             if xlim is not None:
                 axes[i].set_xlim(xlim)
 
-            #filters
-            y = df_i[axis]; t = df_i['t']
-            y_lowess = lowess(y, t, frac=30/len(y), it=2)
-            y_savgol = signal.savgol_filter(y, 15, 3)
-            # axes[i].plot(y_lowess[:,0], y_lowess[:,1], label='lowess', c='orange')
-            axes[i].plot(t, y_savgol, c='r', label='Savgol', alpha=.5)
-
-
+        plt.legend()
         plt.suptitle(posedata.filename.strip('.h5'), fontsize=15, y=1.0)
         plt.tight_layout()
-
 
         if savepath is not None:
             plt.savefig(os.path.join(savepath+posedata.filename.strip('.h5'))+'.jpg', dpi=300)
             plt.close('all')
+
+
+    #plot raw and filtered side by side
+    def plot_raw_filtered(self, posedata, plot_spd=False):
+
+        Nj = len(self.joints)
+        fig, axes = plt.subplots(nrows=Nj, ncols=2, figsize=(18,Nj*4), sharex=True, sharey=False)
+        axes = axes.ravel()
+
+        #filtered data
+        Filter = FilterData()
+        poses_filt = Filter.get_filterdata(posedata,self.joints) #the filtered poses
+
+        for i,j in enumerate(self.joints):
+            df_i = posedata.get_joint_data(j).copy()
+            df_i = df_i.loc[:,(j, ['x','y','likelihood'])]
+            df_i.columns = df_i.columns.droplevel()
+            df_i['t'] = df_i.index
+
+            axes[i].scatter(x='t',y='x', c='likelihood', cmap='cool', data=df_i, marker='^', alpha=.5, s=10)
+            axes[i].plot(df_i['t'], df_i['x'], alpha=.5, lineWidth=0.5)
+            axes[i+2].scatter(poses_filt.index, poses_filt[j], alpha=.5, s=5)
+            axes[i+2].plot(poses_filt.index, poses_filt[j], alpha=.5, lineWidth=0.5)
+
+            axes[i].set_title(j); axes[i+2].set_title(j+' filtered')
+
+            if plot_spd is True:
+                spd = poses_filt[j].diff()
+                ax2 = axes[i*2+1].twinx()
+                ax2.plot(spd,c='k')
+
+        for i,a in enumerate(axes):
+            axes[i].grid()
+
+        sns.despine()
+        plt.tight_layout()
+
+
+
+class FilterData:
+    def __init__(self, p_cutoff=0.3):
+        self.p_cutoff = p_cutoff
+
+    def get_filterdata(self, poses, joints=None):
+        df = poses.get_joint_data(joints)
+        dfout = pd.DataFrame(columns=joints)
+
+        for j in joints:
+            s = (df.loc[:,(j,['x','likelihood'])]).copy()
+            s.columns = s.columns.droplevel(0)
+            s.loc[s.likelihood < self.p_cutoff,'x'] = np.nan
+            # s.interpolate(method='spline', order=3, inplace=True)
+            s.interpolate(inplace=True)
+            x = s.x #use x-trajectory
+            x.dropna(inplace=True)
+
+            #high pass filter
+            sos_filt = butter(8, 0.25, 'highpass', fs=30, output='sos')
+            x_filt = sosfiltfilt(sos_filt,x.values)
+            x_filt = pd.Series(data=x_filt, index=x.index)
+            x = x_filt.copy()
+
+            #remove remaining detection noise with median filter
+            x_filt = x.rolling(5, center=True).median().dropna().interpolate()
+            x = x_filt.copy()
+
+            #zscore and remove outliers
+            NZ = Normalizer()
+            x_filt_z = NZ.zscore(x)
+            x_filt_z = NZ.removeOutliers(x_filt_z,interp=True)
+            x = x_filt_z.copy()
+
+            #interpolate with savgol filter to remove unwanted highfreq jumps
+            try:
+                x_savgol = signal.savgol_filter(x.values, 15, 3)
+                x_savgol = pd.Series(data=x_savgol, index=x.index)
+                x = x_savgol.copy()
+            except:
+                print('savgol filter fit failed')
+
+
+            # x_lowess = lowess(x.values, s.index.values, frac=30/len(x), it=2)
+            # x_lowess = pd.Series(data=x_lowess[:,1], index=x_lowess[:,0])
+            # x = x_lowess.copy()
+
+
+            #remove detection noise with median filter
+            # szf = x.rolling(4, center=True).median().interpolate().dropna()
+            # x = szf.copy()
+            # szf = sz.rolling(10, center=True).mean().interpolate().dropna()
+            # szf = sz.rolling(10, center=True).median().rolling(10, center=True).mean().interpolate().dropna()
+            # szf.plot(alpha=.5)
+
+            dfout[j]=x
+
+        return dfout
 
 
 
@@ -140,7 +230,7 @@ class Normalizer:
         Snew = S.copy()
         Snew[np.abs(Sz) > n_std] = np.nan
         if interp is True:
-            return Snew.interpolate(method='cubic')
+            return Snew.interpolate(method='linear')
         else:
             return Snew
 
@@ -151,58 +241,33 @@ class Normalizer:
         return dfnorm
 
 
-class FilterData:
-    def __init__(self, p_cutoff=0.6):
-        self.p_cutoff = p_cutoff
 
-    def get_filterdata(self, poses, joints=None):
-        df = poses.get_joint_data(joints)
-        dfout = pd.DataFrame(columns=joints)
+#Plotting functions
+#input dataframe and labels and generate scatter plot of truth vs estimate SwSt
+def scatterplot_2(data,x,y,ax,hue=None,legend=None, hue_order=None):
+    tol = 0.1
+    p = sns.scatterplot(x, y, data=data, hue=hue, legend=legend, alpha=.7, ax=ax, hue_order=hue_order)
+    sns.despine()
+    minval = min(min(data[x]),min(data[y])); maxval = max(max(data[x]), max(data[y]))
+    ax.plot([minval,maxval],[minval, maxval],c='gray',linestyle='--', alpha=.5)
+    return p
 
-        for j in joints:
-            s = (df.loc[:,(j,['x','likelihood'])]).copy()
-            s.columns = s.columns.droplevel(0)
-            s.loc[s.likelihood < self.p_cutoff,'x'] = np.nan
-            s.interpolate(method='spline', order=3, inplace=True)
-            x = s.x #use x-trajectory
-            x.dropna(inplace=True)
+#NEW IMPLEMENTATION TBC
+class Filter:
+    def __init__(self, data):
+        self.data = data
 
-            #high pass filter
-            sos_filt = butter(8, 0.25, 'highpass', fs=30, output='sos')
-            x_filt = sosfiltfilt(sos_filt,x.values)
-            x_filt = pd.Series(data=x_filt, index=x.index)
-            x = x_filt.copy()
+    def remove_low_p(self, x, p_cutoff=0.6):
+        x_filt = x[x.likelihood < p_cutoff] = np.nan
+        return x_filt
 
-            #zscore and remove outliers
-            NZ = Normalizer()
-            x_filt_z = NZ.zscore(x)
-            x_filt_z = NZ.removeOutliers(x_filt_z,interp=True)
-            x = x_filt_z.copy()
-
-            #interpolate with savgol filter to remove unwanted highfreq jumps
-            # try:
-            #     x_savgol = signal.savgol_filter(x.values, 15, 3)
-            #     x_savgol = pd.Series(data=x_savgol, index=x.index)
-            #     x = x_savgol.copy()
-            # except:
-            #     print('savgol filter fit failed')
+    def interpolate(self, x):
+        x_filt = x.interpolate(method='spline', order=3)
+        x_filt.dropna(inplace=True)
+        return x_filt
 
 
-            # x_lowess = lowess(x.values, s.index.values, frac=30/len(x), it=2)
-            # x_lowess = pd.Series(data=x_lowess[:,1], index=x_lowess[:,0])
-            # x = x_lowess.copy()
 
-
-            #remove detection noise with median filter
-            # szf = x.rolling(4, center=True).median().interpolate().dropna()
-            # x = szf.copy()
-            # szf = sz.rolling(10, center=True).mean().interpolate().dropna()
-            # szf = sz.rolling(10, center=True).median().rolling(10, center=True).mean().interpolate().dropna()
-            # szf.plot(alpha=.5)
-
-            dfout[j]=x
-
-        return dfout
 
 
 def swing_stance(pksT,pksNT):
@@ -248,3 +313,134 @@ def updatename(x):
         return 'No Brace'
     else:
         return 'NA'
+
+
+#parse AlphaPose json file and returns dataframe with poses
+def json_to_csv_pose(filepath, video_size=(1280,720)):
+
+#// Halpe 26 body keypoints
+    d =     {0:  "Nose",
+    1:  "LEye",
+    2:  "REye",
+    3:  "LEar",
+    4:  "REar",
+    5:  "LShoulder",
+    6:  "RShoulder",
+    7:  "LElbow",
+    8:  "RElbow",
+    9:  "LWrist",
+    10: "RWrist",
+    11: "LHip",
+    12: "RHip",
+    13: "LKnee",
+    14: "RKnee",
+    15: "LAnkle",
+    16: "RAnkle",
+    17:  "Head",
+    18:  "Neck",
+    19:  "Hip",
+    20: "LBigToe",
+    21: "RBigToe",
+    22: "LSmallToe",
+    23: "RSmallToe",
+    24: "LHeel",
+    25: "RHeel"}
+
+    bodyparts = {v:k for k,v in d.items()}
+    #the subset of bodyparts we want to extract and their array indices in OpenPose
+    dict_bp = {}
+    keys = ['RHip', 'RKnee', 'RAnkle', 'LHip','LKnee', 'LAnkle', 'LBigToe', 'LSmallToe', 'LHeel', 'RBigToe',
+          'RSmallToe','RHeel']
+    values = [bodyparts.get(b) for b in keys]
+    kv = zip(keys,values)
+    for k,v in kv:
+        dict_bp.update({k+'_x':v*3})
+        dict_bp.update({k+'_y':v*3+1})
+        dict_bp.update({k+'_c':v*3+2})
+
+    #load pose files
+    print(filepath)
+    with open(filepath) as f:
+        data=json.load(f)
+
+    df = pd.DataFrame(data)
+    df['box_dist_center'] = df.box.apply(lambda x: np.abs(x[0]+x[2]/2 - video_size[0]/2) )
+    df['box_area'] = df.box.apply(lambda x:x[2]*x[3])
+    df.reset_index(inplace=True) #to index rows
+
+    #Heuristics to locate patient based on person id ('idx')
+    #1. sort by id count (most present in video frames) and pick first two
+    ids = (df.groupby('idx')['image_id'].count().sort_values(ascending=False).index[:2])
+    #2. pick id closest to center between the 2
+    patient_id = (df.groupby(['idx'])['box_dist_center'].mean()).loc[ids].sort_values().index[0]
+    df = df.query('idx==@patient_id')
+    df.reset_index(drop=True, inplace=True)
+
+
+    #loop thru all frames keypoints
+    poses = pd.DataFrame() #store poses for all frames
+    for frame_nr, keypoints, box, box_area in zip(df.image_id, df.keypoints, df.box, df.box_area):
+        frame_nr = int(frame_nr.split('.')[0]) #remove jpg extension
+        d = {'Videoname':Path(filepath).stem, 'box':[box], 'box_area':box_area}
+        #parse pose file for desired keypoints
+        for k,v in dict_bp.items():
+            d.update({k:keypoints[v]})
+        #append
+        poses = pd.concat((poses,pd.DataFrame(d, index=[frame_nr])))
+
+    return poses
+
+#convert video to frames
+def FrameCapture(pathIn, pathOut):
+
+    pathOut = Path(pathOut).as_posix()
+    if not os.path.exists(pathOut):
+        os.makedirs(pathOut, exist_ok=True)
+    # Path to video file
+    vidObj = cv2.VideoCapture(pathIn)
+    # Used as counter variable
+    count = 0
+    # checks whether frames were extracted
+    success = 1
+
+    while success:
+        # vidObj object calls read
+        # function extract frames
+        try:
+            success, image = vidObj.read()
+            # Saves the frames with frame-count
+
+            cv2.imwrite(pathOut+"/%d.jpg" % count, image)
+            count += 1
+        except:
+            print(success)
+
+#convert pose dataframe from AlphaPose to DLC
+def convert_to_DLC(poses, filename):
+    newnames = ['Left Hip',
+     'Left Knee',
+     'Left Ankle',
+     'Left Heel',
+     'Left Toe',
+     'Right Hip',
+     'Right Knee',
+     'Right Ankle',
+     'Right Heel',
+     'Right Toe']
+
+    oldnames = ['LHip','LKnee','LAnkle','LHeel','LBigToe','RHip','RKnee','RAnkle','RHeel','RBigToe']
+
+    df = pd.DataFrame()
+
+    for old,new in zip(oldnames, newnames):
+        cols0 = np.tile(filename,3)
+        cols1 = np.tile([new],3)
+        # print(old,new)
+        cols2 = ['x','y','likelihood'] #new levels
+        arrays = [np.array(cols0),np.array(cols1),np.array(cols2)]
+        index = pd.MultiIndex.from_arrays(arrays, names=['filename','bodyparts','coords'])
+        cols = [c for c in poses.columns if old in c]
+        df_ = pd.DataFrame(poses[cols].values,  columns=index)
+        df = pd.concat((df,df_),axis=1)
+
+    return df
