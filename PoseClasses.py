@@ -7,6 +7,8 @@ import re, json
 from pathlib import Path
 from scipy import stats, signal
 from scipy.signal import decimate, butter, sosfiltfilt, find_peaks, savgol_filter
+from scipy.stats import pearsonr
+from scipy.ndimage import gaussian_filter1d
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import itertools
 import os
@@ -19,11 +21,14 @@ class PoseData:
         self.filename = filename
         self.fps = fps
 
-        self.poses = pd.read_hdf(self.path / self.filename) #read and store dataframe as attribute
+        poses = pd.read_hdf(self.path / self.filename) #read and store dataframe as attribute
+        poses.columns = poses.columns.droplevel(0) #drop scorer name (added by DLC)
+        self.poses = poses
         self.poses.index /= self.fps
+        self.normalized = False #flag that indicates if pose coordinates have been scaled to leg length
 
     def get_joint_names(self):
-        return list(self.poses.columns.get_level_values(1).unique())
+        return list(self.poses.columns.get_level_values(0).unique())
 
     def get_duration(self):
         return np.round(len(self.poses)/self.fps)
@@ -31,14 +36,75 @@ class PoseData:
     def get_joint_data(self, joints=None):
         if joints is None: #return all joints data
             df = self.poses.copy()
-            df.columns = df.columns.droplevel(0)
             return df
         else:
             for j in joints:
                 assert j in joints
-            df = self.poses.loc[:, (slice(None), joints, slice(None))]
-            df.columns = df.columns.droplevel(0)
+            df = self.poses.loc[:, (joints, slice(None))]
             return df
+
+    # def get_joint_data(self, joints=None):
+    #     if joints is None: #return all joints data
+    #         df = self.poses.copy()
+    #         df.columns = df.columns.droplevel(0)
+    #         return df
+    #     else:
+    #         for j in joints:
+    #             assert j in joints
+    #         df = self.poses.loc[:, (slice(None), joints, slice(None))]
+    #         df.columns = df.columns.droplevel(0)
+    #         return df
+
+    def normalize_data(self):
+
+        if self.normalized is True:
+            print('data already scaled')
+        else:
+
+            df = self.get_joint_data()
+            dfnorm = df.copy()
+
+            #normalize pixel coords of each side by leg length and relative to center of the hips
+            hip_center_x = (df.loc[:, ('Left Hip','x')] + df.loc[:, ('Right Hip','x')])/2
+            hip_center_y = (df.loc[:, ('Left Hip','y')] + df.loc[:, ('Right Hip','y')])/2
+
+            xref = hip_center_x; yref = hip_center_y #ref point
+
+            #use leg length as a reference - use mean between left and right leg (can also use femur or shank)
+            legL = df.loc[:,(['Left Hip','Left Ankle'],['x','y'])]
+            legR = df.loc[:,(['Right Hip','Right Ankle'],['x','y'])]
+            length_L = vector_norm(legL)
+            length_R = vector_norm(legR)
+            L = (length_L+length_R)/2
+
+            for k in df.loc[:,(slice(None),['x'])].columns:
+                dfnorm.loc[:,k] = (df.loc[:,k] - xref)/L
+            for k in df.loc[:,(slice(None),['y'])].columns:
+                dfnorm.loc[:,k] = (df.loc[:,k] - yref)/L
+
+            self.poses = dfnorm
+            self.normalized = True
+
+    def __repr__(self):
+        return '\n'.join([
+            f'Path: {self.path}',
+            f'Filename: {self.filename}',
+            f'Video FPS: {self.fps}',
+            f'Normalized: {self.normalized}',
+            ])
+
+
+
+
+
+#calculate vector norm for each frame from dataframe, and interpolates missing values
+def vector_norm(df):
+    v_norm = np.sqrt((df.loc[:,(slice(None),'x')].iloc[:,0] - df.loc[:,(slice(None),'x')].iloc[:,1])**2 +
+        (df.loc[:,(slice(None),'y')].iloc[:,0] - df.loc[:,(slice(None),'y')].iloc[:,1])**2)
+    v_norm.dropna(inplace=True)
+    v_norm.interpolate(inplce=True)
+    return v_norm
+
 
 
 #TO DO - create a PlotPoses Class where the attributes are the marker size, type of plot, etc.
@@ -103,7 +169,7 @@ class AnalyzePoses:
             axes[i].scatter(x='t',y='x', c='likelihood', cmap='cool', data=df_i, marker='^', alpha=.5, s=10)
             axes[i].plot(df_i['t'], df_i['x'], alpha=.5, lineWidth=0.5)
             axes[i+2].scatter(poses_filt.index, poses_filt[j], alpha=.5, s=5)
-            axes[i+2].plot(poses_filt.index, poses_filt[j], alpha=.5, lineWidth=0.5)
+            axes[i+2].plot(poses_filt.index, poses_filt[j], alpha=.5, lineWidth=2)
 
             axes[i].set_title(j); axes[i+2].set_title(j+' filtered')
 
@@ -117,6 +183,8 @@ class AnalyzePoses:
 
         sns.despine()
         plt.tight_layout()
+        plt.suptitle(posedata.filename.strip('.h5'), fontsize=15, y=1.0)
+
 
 
 
@@ -150,16 +218,21 @@ class FilterData:
             #zscore and remove outliers
             NZ = Normalizer()
             x_filt_z = NZ.zscore(x)
-            x_filt_z = NZ.removeOutliers(x_filt_z,interp=True)
+            # x_filt_z = NZ.removeOutliers(x_filt_z,interp=True)
             x = x_filt_z.copy()
 
             #interpolate with savgol filter to remove unwanted highfreq jumps
-            try:
-                x_savgol = signal.savgol_filter(x.values, 15, 3)
-                x_savgol = pd.Series(data=x_savgol, index=x.index)
-                x = x_savgol.copy()
-            except:
-                print('savgol filter fit failed')
+            # try:
+            #     x_savgol = signal.savgol_filter(x.values, 15, 3)
+            #     x_savgol = pd.Series(data=x_savgol, index=x.index)
+            #     x = x_savgol.copy()
+            # except:
+            #     print('savgol filter fit failed')
+
+            #interpolate with Gaussian Filter
+            print('gaussian filter ON')
+            x_filt = gaussian_filter1d(x, sigma=5)
+            x = pd.Series(data=x_filt, index=x.index)
 
 
             # x_lowess = lowess(x.values, s.index.values, frac=30/len(x), it=2)
@@ -177,6 +250,17 @@ class FilterData:
             dfout[j]=x
 
         return dfout
+
+
+        # def new_filter(self, poses, joints=None):
+        #     df = poses.get_joint_data(joints)
+        #     dfout = pd.DataFrame(columns=joints)
+        #
+        #     for j in joints:
+
+                #normalize
+
+
 
 
 
@@ -250,6 +334,12 @@ def scatterplot_2(data,x,y,ax,hue=None,legend=None, hue_order=None):
     sns.despine()
     minval = min(min(data[x]),min(data[y])); maxval = max(max(data[x]), max(data[y]))
     ax.plot([minval,maxval],[minval, maxval],c='gray',linestyle='--', alpha=.5)
+    xydata = data[[x,y]].copy()
+    xydata.dropna(inplace=True)
+    r,rp = pearsonr(xydata[x],xydata[y])
+    # print(sum(data[x].isnull()), sum(data[y].isnull()))
+    ax.set_title(f'r={r:.3f}')
+    plt.tight_layout()
     return p
 
 #NEW IMPLEMENTATION TBC
@@ -265,8 +355,6 @@ class Filter:
         x_filt = x.interpolate(method='spline', order=3)
         x_filt.dropna(inplace=True)
         return x_filt
-
-
 
 
 
