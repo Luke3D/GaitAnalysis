@@ -43,17 +43,6 @@ class PoseData:
             df = self.poses.loc[:, (joints, slice(None))]
             return df
 
-    # def get_joint_data(self, joints=None):
-    #     if joints is None: #return all joints data
-    #         df = self.poses.copy()
-    #         df.columns = df.columns.droplevel(0)
-    #         return df
-    #     else:
-    #         for j in joints:
-    #             assert j in joints
-    #         df = self.poses.loc[:, (slice(None), joints, slice(None))]
-    #         df.columns = df.columns.droplevel(0)
-    #         return df
 
     def normalize_data(self):
 
@@ -150,7 +139,7 @@ class AnalyzePoses:
 
 
     #plot raw and filtered side by side
-    def plot_raw_filtered(self, posedata, plot_spd=False):
+    def plot_raw_filtered(self, posedata, plot_spd=False, truth=None):
 
         Nj = len(self.joints)
         fig, axes = plt.subplots(nrows=Nj, ncols=2, figsize=(18,Nj*4), sharex=True, sharey=False)
@@ -166,17 +155,28 @@ class AnalyzePoses:
             df_i.columns = df_i.columns.droplevel()
             df_i['t'] = df_i.index
 
-            axes[i].scatter(x='t',y='x', c='likelihood', cmap='cool', data=df_i, marker='^', alpha=.5, s=10)
-            axes[i].plot(df_i['t'], df_i['x'], alpha=.5, lineWidth=0.5)
-            axes[i+2].scatter(poses_filt.index, poses_filt[j], alpha=.5, s=5)
-            axes[i+2].plot(poses_filt.index, poses_filt[j], alpha=.5, lineWidth=2)
+            axes[i*2].scatter(x='t',y='x', c='likelihood', cmap='cool', data=df_i, marker='^', alpha=.5, s=8)
+            axes[i*2].plot(df_i['t'], df_i['x'], alpha=.5, lineWidth=2)
+            axes[i*2+1].scatter(poses_filt.index, poses_filt[j], alpha=.5, s=5)
+            axes[i*2+1].plot(poses_filt.index, poses_filt[j], alpha=.5, lineWidth=2)
 
-            axes[i].set_title(j); axes[i+2].set_title(j+' filtered')
+            axes[i*2].set_title(j); axes[i*2+1].set_title(j+' filtered')
 
             if plot_spd is True:
                 spd = poses_filt[j].diff()
                 ax2 = axes[i*2+1].twinx()
                 ax2.plot(spd,c='k')
+
+            if truth is not None:
+                if 'Left' in j:
+                    cols = ['LHS','LTO']
+                else:
+                    cols = ['RHS','RTO']
+                for hs,to in zip(truth[cols[0]], truth[cols[1]]):
+                    axes[i*2].axvline(x=hs,c='r', label='HS', lineWidth=1)
+                    axes[i*2].axvline(x=to,c='g', label='TO', lineWidth=1)
+                    axes[i*2+1].axvline(x=hs,c='r', label='HS', lineWidth=1)
+                    axes[i*2+1].axvline(x=to,c='g', label='TO', lineWidth=1)
 
         for i,a in enumerate(axes):
             axes[i].grid()
@@ -215,7 +215,7 @@ class FilterData:
             x_filt = x.rolling(5, center=True).median().dropna().interpolate()
             x = x_filt.copy()
 
-            #zscore and remove outliers
+            #zscore (this is just another rescaling between -1,1 really). Optionally try removing outliers
             NZ = Normalizer()
             x_filt_z = NZ.zscore(x)
             # x_filt_z = NZ.removeOutliers(x_filt_z,interp=True)
@@ -230,8 +230,7 @@ class FilterData:
             #     print('savgol filter fit failed')
 
             #interpolate with Gaussian Filter
-            print('gaussian filter ON')
-            x_filt = gaussian_filter1d(x, sigma=5)
+            x_filt = gaussian_filter1d(x, sigma=1)
             x = pd.Series(data=x_filt, index=x.index)
 
 
@@ -250,17 +249,6 @@ class FilterData:
             dfout[j]=x
 
         return dfout
-
-
-        # def new_filter(self, poses, joints=None):
-        #     df = poses.get_joint_data(joints)
-        #     dfout = pd.DataFrame(columns=joints)
-        #
-        #     for j in joints:
-
-                #normalize
-
-
 
 
 
