@@ -10,6 +10,7 @@ from scipy.signal import decimate, butter, sosfiltfilt, find_peaks, savgol_filte
 from scipy.stats import pearsonr
 from scipy.ndimage import gaussian_filter1d
 from statsmodels.nonparametric.smoothers_lowess import lowess
+from statsmodels.tsa.stattools import acf
 import itertools
 import os
 import matplotlib
@@ -351,11 +352,11 @@ def swing_stance(pksT,pksNT):
     minswingT = 0.05
     maxstanceT = 3
 
-    T = list(pksT.values)+list(pksNT.values)
-    S = list(np.ones_like(pksT))+list(np.zeros_like(pksNT))
-    T_sorted = np.sort(T)
-    inds_sorted = np.argsort(T)
-    S = [S[i] for i in inds_sorted]
+    T = list(pksT.values)+list(pksNT.values) #peak times
+    S = list(np.ones_like(pksT))+list(np.zeros_like(pksNT)) #binary indicator of peak and trough
+    T_sorted = np.sort(T) #sort the time sequence
+    inds_sorted = np.argsort(T) #sort the array index sequence
+    S = [S[i] for i in inds_sorted] #the binary array indicating HS and TO
     #swings are 1; stances are -1; missed are 0
     swst = pd.DataFrame({'dT':np.diff(T_sorted), 'type':np.diff(S)})
     swst['Type'] = 'Missed'
@@ -366,19 +367,128 @@ def swing_stance(pksT,pksNT):
     return swst
 
 
-def findHSTO(szf, direction, plotdata=True):
+# #returns sequence of DST for each step
+#inputs dataframe y of left and right leg keypoint timeseries
+def gait_params(y, direction, plotdata=False):
+
+    #define dictionary of parameters
+    gait_par = {'HSTO':[], 'swingL':[], 'stanceL':[], 'swingR':[], 'stanceR':[],
+                'DST':[], 'asymmetry_swing':[], 'asymmetry_stance':[],
+                'cadence':[], 'step_F_Left':[], 'step_F_Right':[], 'swing_stance':[]}
+
+    minswingT = 0.05
+    maxstanceT = 3
+
+    #HS and TO for each side
+    HSTO = pd.DataFrame()
+    for side_j in y.columns:
+        y_side = y[side_j]
+        side = side_j.split(' ')[0]
+        HS,TO = findHSTO(y_side, direction, plotdata=False) #find positive and neg peaks (approx HS, TO)
+        T = list(HS.values)+list(TO.values) #HS,TO times for current side
+        S = ['HS' for i in range(len(HS))] + ['TO' for i in range(len(TO))]
+        T_sorted = np.sort(T) #sort the time sequence
+        inds_sorted = np.argsort(T) #sort the array index sequence
+        S = [S[i] for i in inds_sorted] #array with HS TO names
+
+        HSTO = pd.concat((HSTO, pd.DataFrame({'Event':S, 'Side':side}, index=T_sorted)))
+    #add binary value to identify HS and TO and sort by event time
+    HSTO['Event_binary'] = 0
+    HSTO.loc[HSTO.Event=='HS','Event_binary'] = 1
+    HSTO = HSTO.sort_index()
+    gait_par['HSTO'] = HSTO
+
+    #compute swing and stance
+    swst = pd.DataFrame()
+    for side in HSTO.Side.unique():
+        HSTO_side = HSTO.query('Side==@side')
+        swst = pd.concat((swst, pd.DataFrame({'dT':np.diff(HSTO_side.index),
+        'Event_binary':np.diff(HSTO_side.Event_binary), 'side':side})), axis=0)
+        swst['Type'] = 'Missed'
+        swst.loc[swst.Event_binary==-1,'Type']='Stance'
+        swst.loc[swst.Event_binary==1,'Type']='Swing'
+        swst.loc[(swst.dT > maxstanceT) | (swst.dT <minswingT),'Type'] = 'Missed'
+    gait_par['stanceR'] = swst.query('Type=="Stance" & side=="Right"').dT.median()
+    gait_par['swingR'] = swst.query('Type=="Swing" & side=="Right"').dT.median()
+    gait_par['stanceL'] = swst.query('Type=="Stance" & side=="Left"').dT.median()
+    gait_par['swingL'] = swst.query('Type=="Swing" & side=="Left"').dT.median()
+    # gait_par['swing_stance'] = swst
+
+    #asymmetry index swing and stances
+    asym_swing = asymmetry_index(swst, type='Swing')
+    asym_stance = asymmetry_index(swst, type='Stance')
+    gait_par['asymmetry_swing'] = asym_swing
+    gait_par['asymmetry_stance'] = asym_stance
+
+    #DST
+    DST = pd.DataFrame()
+    Lhs = HSTO.loc[(HSTO.Side=='Left') & (HSTO.Event=='HS')].index
+    Rto = HSTO.loc[(HSTO.Side=='Right') & (HSTO.Event=='TO')].index
+    Lhs = np.sort(Lhs)
+    Rto = np.sort(Rto)
+    Rto = Rto[Rto > Lhs[0]]
+    m = min(len(Rto),len(Lhs))
+    Lhs = Lhs[:m]; Rto = Rto[:m] #to match steps
+    DST = pd.concat((DST, pd.DataFrame({'DST':Rto-Lhs, 'Side':'Left'})), axis=0)
+    # DST_L = np.median(Rto - Lhs)
+    Rhs = HSTO.loc[(HSTO.Side=='Right') & (HSTO.Event=='HS')].index
+    Lto = HSTO.loc[(HSTO.Side=='Left') & (HSTO.Event=='TO')].index
+    Rhs = np.sort(Rhs)
+    Lto = np.sort(Lto)
+    Lto = Lto[Lto > Rhs[0]]
+    m = min(len(Lto),len(Rhs))
+    Lto = Lto[:m]; Rhs = Rhs[:m] #to match steps
+    DST = pd.concat((DST, pd.DataFrame({'DST':Lto-Rhs, 'Side':'Right'})), axis=0)
+    # DST_R = np.median(Lto - Rhs)
+    gait_par['DST'] = DST.median().values[0]
+
+    #cadence - we can use autocorrelation or count steps
+    #autocorrelation
+    for side in y.columns:
+        y_side = y[side]
+        ac, ci = acf(y_side, nlags=220, alpha=.05)
+        t = np.arange(0,len(ci)/30,1/30)
+        # plt.plot(t,ac)
+        pks, _ = find_peaks(ac, distance=10)
+        stepf = pks[0]/30*60 #steps/min
+        gait_par['step_F_'+side.split(' ')[0]] = stepf
+
+
+    #calculate number of HS / time
+    N_steps = len(HSTO.query('Event=="HS"'))
+    t = HSTO.query('Event=="HS"').index
+    T = t[-1] - t[0]
+    gait_par['cadence'] = N_steps/T*60
+
+
+    return gait_par
+
+
+# Asymmetry index - assumes dataframe with dT, side and type
+# (L-R) / (L+R) * 100
+def asymmetry_index(swst, type='Swing'):
+    L = swst.query('side=="Left" & Type==@type')
+    R = swst.query('side=="Right" & Type==@type')
+    asym_idx = np.abs(L.dT.median() - R.dT.median()) / (L.dT.median() + R.dT.median())*100
+    return asym_idx
+
+
+
+#inputs a normalized time series of joint trajectory and returns positive and negative peak times
+def findHSTO(szf, direction, plotdata=True, ax=None):
     prom = .2
     if direction == 'L':
         szf*=-1 #invert peaks sign if walking towards the left
-    pks,_ = find_peaks(szf, distance=10, prominence=prom)
-    pksT = szf.index[pks]
-    pksN,_ = find_peaks(szf*-1, distance=10, prominence=prom) #since signal is z-scored
+    pks,_ = find_peaks(szf, distance=10, prominence=prom) #return peaks index
+    pksT = szf.index[pks] #convert index to peak time
+    pksN,_ = find_peaks(szf*-1, distance=10, prominence=prom) #find negative peaks
     pksNT = szf.index[pksN]
     if plotdata is True:
-        plt.figure()
-        szf.plot()
-        plt.plot(pksT,szf.iloc[pks],'x')
-        plt.plot(pksNT,szf.iloc[pksN],'x',c='r')
+        if ax is None:
+            fig, ax = plt.subplots(1,1)
+        szf.plot(ax=ax)
+        ax.plot(pksT,szf.iloc[pks],'x', c='r') #HS
+        ax.plot(pksNT,szf.iloc[pksN],'o',c='r') #TO
 
     return pksT,pksNT
 
