@@ -85,6 +85,26 @@ class PoseData:
 
 
 
+#plot keypoint time seires for AlphaPose and DLC
+def compare_pose_outputs(filename, pathAP, pathDLC, joints=['Left Heel','Right Heel']):
+
+    posefiles=[c for c in os.listdir(pathAP) if c.endswith('.h5')]
+    print(filename)
+
+    #plot with AlphaPose
+    jj = joints
+    poses = PoseData(pathAP, filename)
+    PA = AnalyzePoses(jj)
+#     PA.plot_joints(poses)
+    PA.plot_raw_filtered(poses)
+
+    name_to_search = Path(filename).stem
+    filenameDLC = [f for f in os.listdir(pathDLC) if (name_to_search in f and f.endswith('.h5'))][0]
+    poses = PoseData(pathDLC, filenameDLC)
+    PA = AnalyzePoses(jj)
+#     PA.plot_joints(poses)
+    PA.plot_raw_filtered(poses)
+
 
 
 #calculate vector norm for each frame from dataframe, and interpolates missing values
@@ -319,7 +339,8 @@ class Normalizer:
 #input dataframe and labels and generate scatter plot of truth vs estimate SwSt
 def scatterplot_2(data,x,y,ax,hue=None,legend=None, hue_order=None):
     tol = 0.1
-    p = sns.scatterplot(x, y, data=data, hue=hue, legend=legend, alpha=.7, ax=ax, hue_order=hue_order)
+    # p = sns.scatterplot(x, y, data=data, hue=hue, legend=legend, alpha=.7, ax=ax, hue_order=hue_order)
+    p = sns.regplot(x, y, data=data, ax=ax)
     sns.despine()
     minval = min(min(data[x]),min(data[y])); maxval = max(max(data[x]), max(data[y]))
     ax.plot([minval,maxval],[minval, maxval],c='gray',linestyle='--', alpha=.5)
@@ -365,6 +386,7 @@ def swing_stance(pksT,pksNT):
     swst.loc[(swst.dT > maxstanceT) | (swst.dT <minswingT),'Type'] = 'Missed'
 
     return swst
+
 
 
 # #returns sequence of DST for each step
@@ -429,7 +451,7 @@ def gait_params(y, direction, plotdata=False):
     Rto = Rto[Rto > Lhs[0]]
     m = min(len(Rto),len(Lhs))
     Lhs = Lhs[:m]; Rto = Rto[:m] #to match steps
-    DST = pd.concat((DST, pd.DataFrame({'DST':Rto-Lhs, 'Side':'Left'})), axis=0)
+    DST_L = pd.concat((DST, pd.DataFrame({'DST':Rto-Lhs, 'Side':'Left'})), axis=0)
     # DST_L = np.median(Rto - Lhs)
     Rhs = HSTO.loc[(HSTO.Side=='Right') & (HSTO.Event=='HS')].index
     Lto = HSTO.loc[(HSTO.Side=='Left') & (HSTO.Event=='TO')].index
@@ -438,16 +460,18 @@ def gait_params(y, direction, plotdata=False):
     Lto = Lto[Lto > Rhs[0]]
     m = min(len(Lto),len(Rhs))
     Lto = Lto[:m]; Rhs = Rhs[:m] #to match steps
-    DST = pd.concat((DST, pd.DataFrame({'DST':Lto-Rhs, 'Side':'Right'})), axis=0)
-    # DST_R = np.median(Lto - Rhs)
-    gait_par['DST'] = DST.median().values[0]
+    DST_R = pd.concat((DST, pd.DataFrame({'DST':Lto-Rhs, 'Side':'Right'})), axis=0)
+    DST = (DST_L.DST + DST_R.DST).median()
+    # gait_par['DST'] = DST.median().values[0]
+    gait_par['DST'] = DST
 
     #cadence - we can use autocorrelation or count steps
     #autocorrelation
     for side in y.columns:
         y_side = y[side]
-        ac, ci = acf(y_side, nlags=220, alpha=.05)
-        t = np.arange(0,len(ci)/30,1/30)
+        # print(y_side.shape)
+        ac, ci = acf(y_side, nlags=len(y_side)//2, alpha=.05)
+        t = np.arange(0, len(ac)/30, 1/30)
         # plt.plot(t,ac)
         pks, _ = find_peaks(ac, distance=10)
         stepf = pks[0]/30*60 #steps/min
@@ -459,7 +483,6 @@ def gait_params(y, direction, plotdata=False):
     t = HSTO.query('Event=="HS"').index
     T = t[-1] - t[0]
     gait_par['cadence'] = N_steps/T*60
-
 
     return gait_par
 
