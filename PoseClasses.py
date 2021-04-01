@@ -11,6 +11,7 @@ from scipy.stats import pearsonr
 from scipy.ndimage import gaussian_filter1d
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from statsmodels.tsa.stattools import acf
+from tqdm import tqdm
 import itertools
 import os
 import matplotlib
@@ -27,6 +28,7 @@ class PoseData:
         self.poses = poses
         self.poses.index /= self.fps
         self.normalized = False #flag that indicates if pose coordinates have been scaled to leg length
+        self.filtered = False #flag that indicates if coordinates have been filtered (smoothed)
 
     def get_joint_names(self):
         return list(self.poses.columns.get_level_values(0).unique())
@@ -74,6 +76,24 @@ class PoseData:
 
             self.poses = dfnorm
             self.normalized = True
+            
+
+    def filter_data(self, joints=None):
+        pass
+        
+        # if self.normalized is True:
+        #     print('data already scaled')
+        # else:
+
+        #     df = self.get_joint_data()
+        #     if self.joints is None:
+        #         joints = self.poses.get_joint_names()
+        #     df_filt = pd.DataFrame(columns)
+
+
+    def window_data(self, winsize=4, overlap=0.5):
+        pass
+
 
     def __repr__(self):
         return '\n'.join([
@@ -81,7 +101,34 @@ class PoseData:
             f'Filename: {self.filename}',
             f'Video FPS: {self.fps}',
             f'Normalized: {self.normalized}',
+            f'Filtered: {self.filtered}',
             ])
+
+
+
+#plot and save figure for joint keypoint data for all videos
+#input path of posefile data (.h5)
+def save_plot_keypoint_ts(path, savepathfig, joints=None):
+
+    if joints is None:
+        joints = ['Left Toe', 'Right Toe', 'Left Heel', 'Right Heel', 'Left Ankle', 'Right Ankle']
+
+    posefiles=[c for c in os.listdir(path) if c.endswith('.h5')]
+    Filter = FilterData()
+    print(f'saving figures into {savepathfig}')
+    for filename in tqdm(posefiles):
+        try:
+            poses = PoseData(path, filename)
+            y = Filter.get_filterdata(poses, joints)
+            plt.figure(); y.plot()
+            subjid = '_'
+            l = filename.split('_')[0:4]
+            subjid = subjid.join(l)
+            plt.savefig(os.path.join(savepathfig,subjid+'.jpg'), dpi=300)
+            plt.clf(); plt.close('all')
+        except(IndexError):
+            print(f'{filename} - metadata not found')
+
 
 
 
@@ -222,7 +269,7 @@ class FilterData:
             s.columns = s.columns.droplevel(0)
             s.loc[s.likelihood < self.p_cutoff,'x'] = np.nan
             # s.interpolate(method='spline', order=3, inplace=True)
-            s.interpolate(inplace=True)
+            s.interpolate(inplace=True, method='linear')
             x = s.x #use x-trajectory
             x.dropna(inplace=True)
 
@@ -287,8 +334,8 @@ class DataLoader:
     def __iter__(self):
         T = self.posedata.get_duration()
         step = self.winsize - (self.overlap*self.winsize)
-
-        for i in np.arange(0, T, step): yield self.posedata.get_joint_data(self.joints)[i:i+step]
+        for i in np.arange(0, T, step): 
+            yield self.posedata.get_joint_data(self.joints)[i: i+self.winsize]
 
 class FeatureExtractor:
     def __init__(self, dataloader, compute_fn=compute_features):
@@ -499,7 +546,7 @@ def asymmetry_index(swst, type='Swing'):
 
 #inputs a normalized time series of joint trajectory and returns positive and negative peak times
 def findHSTO(szf, direction, plotdata=True, ax=None):
-    prom = .2
+    prom = 1
     if direction == 'L':
         szf*=-1 #invert peaks sign if walking towards the left
     pks,_ = find_peaks(szf, distance=10, prominence=prom) #return peaks index
