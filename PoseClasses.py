@@ -104,6 +104,41 @@ class PoseData:
             f'Filtered: {self.filtered}',
             ])
 
+#create input (ts of keypoints) to train CNN
+def CNN_create_dataset(path, filename, direction, gaitrite):
+
+    joints = ['Left Toe', 'Right Toe', 'Left Heel', 'Right Heel', 'Left Ankle', 'Right Ankle']
+
+    poses = PoseData(path, filename)
+
+    #metadata
+    subjid = '_'
+    l = filename.split('_')[0:4]
+    subjid = subjid.join(l)
+
+    #filter data
+    Filter = FilterData()
+    ts = Filter.get_filterdata(poses,joints) #the filtered poses
+    ts.index-=ts.index[0] #reset time to start from 0 (boundary)
+    if direction =='L':
+        ts*=-1 #mirror time series if walking towards left
+    poses_filtered = poses
+    poses_filtered.poses = ts
+    poses_filtered.filtered = True
+
+    #window data
+    DL = DataLoader(poses_filtered, winsize=4, overlap=0.75, joints=None)
+    W = []
+    for w in DL:
+        if len(w) > DL.winsize*poses_filtered.fps: #to create clips of same size
+            w = w.values
+#             w = w.values[:, np.newaxis, :] # add extra dimension
+            w = w[:-1,:] #to make windows even size
+            W.append(w) 
+    #assemble data for current subject
+    x = np.stack(W, axis=0)
+
+    return x, subjid
 
 
 #plot and save figure for joint keypoint data for all videos
@@ -206,11 +241,50 @@ class AnalyzePoses:
             plt.close('all')
 
 
+    def plot_filtered(self, posedata, hsto_truth=None, hsto_est=None):
+        
+        assert len(self.joints) == 2
+
+        #plot L and R for each joint
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(18,12), sharex=True, sharey=True)
+        axes = axes.ravel()
+        #filter data
+        Filter = FilterData()
+        poses_filt = Filter.get_filterdata(posedata, self.joints)
+        #plot L and R on each col 
+        for i,j in enumerate(self.joints):
+            axes[i].scatter(poses_filt.index, poses_filt[j], alpha=.5, s=5)
+            axes[i].plot(poses_filt.index, poses_filt[j], alpha=.5, lineWidth=2)
+            axes[i].set_title(j+' filtered')
+            #HS and TO truth (times)
+            if hsto_truth is not None:
+                    if 'Left' in j:
+                        cols = ['LHS','LTO']
+                    else:
+                        cols = ['RHS','RTO']
+                    for hs,to in zip(hsto_truth[cols[0]], hsto_truth[cols[1]]):
+                        axes[i].axvline(x=float(hs),c='r', label='HS')
+                        axes[i].axvline(x=float(to),c='g', label='TO')
+            if hsto_est is not None:
+                #parse side 
+                side = j.split(' ')[0] #assumes first word is side
+                assert side == 'Left' or side == 'Right'
+                hs_all = hsto_est.query('Side==@side & Event=="HS"').Time
+                to_all = hsto_est.query('Side==@side & Event=="TO"').Time
+                for hs,to in zip(hs_all, to_all):
+                        axes[i].axvline(x=float(hs),c='r', label='HS', linestyle='--')
+                        axes[i].axvline(x=float(to),c='g', label='TO', linestyle='--')
+
+        sns.despine()
+        plt.tight_layout()
+        plt.suptitle(posedata.filename.strip('.h5'), fontsize=12, y=1.0)
+
+
     #plot raw and filtered side by side
-    def plot_raw_filtered(self, posedata, plot_spd=False, truth=None):
+    def plot_raw_filtered(self, posedata, plot_spd=False, truth=None, est=None):
 
         Nj = len(self.joints)
-        fig, axes = plt.subplots(nrows=Nj, ncols=2, figsize=(18,Nj*4), sharex=True, sharey=False)
+        fig, axes = plt.subplots(nrows=Nj, ncols=2, figsize=(18,Nj*4), sharex=False, sharey=False)
         axes = axes.ravel()
 
         #filtered data
@@ -227,6 +301,7 @@ class AnalyzePoses:
             axes[i*2].plot(df_i['t'], df_i['x'], alpha=.5, lineWidth=2)
             axes[i*2+1].scatter(poses_filt.index, poses_filt[j], alpha=.5, s=5)
             axes[i*2+1].plot(poses_filt.index, poses_filt[j], alpha=.5, lineWidth=2)
+            labels = axes[i*2+1].get_xticks()
 
             axes[i*2].set_title(j); axes[i*2+1].set_title(j+' filtered')
 
@@ -241,13 +316,14 @@ class AnalyzePoses:
                 else:
                     cols = ['RHS','RTO']
                 for hs,to in zip(truth[cols[0]], truth[cols[1]]):
-                    axes[i*2].axvline(x=hs,c='r', label='HS', lineWidth=1)
-                    axes[i*2].axvline(x=to,c='g', label='TO', lineWidth=1)
-                    axes[i*2+1].axvline(x=hs,c='r', label='HS', lineWidth=1)
-                    axes[i*2+1].axvline(x=to,c='g', label='TO', lineWidth=1)
+                    axes[i*2].axvline(x=float(hs),c='r', label='HS', lineWidth=1)
+                    axes[i*2].axvline(x=float(to),c='g', label='TO', lineWidth=1)
+                    axes[i*2+1].axvline(x=float(hs),c='r', label='HS', lineWidth=1)
+                    axes[i*2+1].axvline(x=float(to),c='g', label='TO', lineWidth=1)
 
-        for i,a in enumerate(axes):
-            axes[i].grid()
+        # for a in axes:
+        #     a[i].grid()
+        #     a.set_xticks(df_i.index)
 
         sns.despine()
         plt.tight_layout()
@@ -319,7 +395,7 @@ class FilterData:
         return dfout
 
 
-
+#compute stats features on a window of data
 def compute_features(df):
     return df
     #extract x-y joints data
