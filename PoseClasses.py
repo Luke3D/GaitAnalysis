@@ -117,17 +117,23 @@ def CNN_create_dataset(path, filename, direction, gaitrite):
     subjid = subjid.join(l)
 
     #filter data
+    ts_ = []
     Filter = FilterData()
-    ts = Filter.get_filterdata(poses,joints) #the filtered poses withouth confidence
-    # ts = Filter.get_normalized_data(poses, joints) #raw values with confidence
-    ts.index-=ts.index[0] #reset time to start from 0 (boundary)
-    if direction =='L':
-        ts*=-1 #mirror time series if walking towards left
+    for axis in ['x','y']:
+        ts = Filter.get_filterdata(poses,joints, axis=axis) #the filtered poses withouth confidence
+        # ts = Filter.get_normalized_data(poses, joints) #raw values with confidence
+        ts.index-=ts.index[0] #reset time to start from 0 (boundary)
+        if direction =='L' and axis=='x':
+            ts*=-1 #mirror time series if walking towards left
 
-    #additional features
-    #distance between L and R ankle
-    ts['LR_Ankle_dist'] = ts['Left Ankle'] - ts['Right Ankle']
-    ts['LR_Knee_dist'] = ts['Left Knee'] - ts['Right Knee']
+        #additional features
+        #distance between L and R ankle
+        ts['LR_Ankle_dist'] = ts['Left Ankle'] - ts['Right Ankle']
+        ts['LR_Knee_dist'] = ts['Left Knee'] - ts['Right Knee']
+
+        ts_.append(ts)
+    
+    ts = pd.concat(ts_, axis=1)
 
     poses_filtered = poses
     poses_filtered.poses = ts
@@ -376,17 +382,17 @@ class FilterData:
         return dfout
         
 
-    def get_filterdata(self, poses, joints=None):
+    def get_filterdata(self, poses, joints=None, axis='x'):
         df = poses.get_joint_data(joints)
         dfout = pd.DataFrame(columns=joints)
 
         for j in joints:
-            s = (df.loc[:,(j,['x','likelihood'])]).copy()
+            s = (df.loc[:,(j,[axis,'likelihood'])]).copy()
             s.columns = s.columns.droplevel(0)
-            s.loc[s.likelihood < self.p_cutoff,'x'] = np.nan
+            s.loc[s.likelihood < self.p_cutoff, axis] = np.nan
             # s.interpolate(method='spline', order=3, inplace=True)
             s.interpolate(inplace=True, method='linear')
-            x = s.x #use x-trajectory
+            x = s[axis] #use x-trajectory
             x.dropna(inplace=True)
 
             #high pass filter
@@ -405,31 +411,10 @@ class FilterData:
             # x_filt_z = NZ.removeOutliers(x_filt_z,interp=True)
             x = x_filt_z.copy()
 
-            #interpolate with savgol filter to remove unwanted highfreq jumps
-            # try:
-            #     x_savgol = signal.savgol_filter(x.values, 15, 3)
-            #     x_savgol = pd.Series(data=x_savgol, index=x.index)
-            #     x = x_savgol.copy()
-            # except:
-            #     print('savgol filter fit failed')
-
             #interpolate with Gaussian Filter
             x_filt = gaussian_filter1d(x, sigma=1)
             x = pd.Series(data=x_filt, index=x.index)
-
-
-            # x_lowess = lowess(x.values, s.index.values, frac=30/len(x), it=2)
-            # x_lowess = pd.Series(data=x_lowess[:,1], index=x_lowess[:,0])
-            # x = x_lowess.copy()
-
-
-            #remove detection noise with median filter
-            # szf = x.rolling(4, center=True).median().interpolate().dropna()
-            # x = szf.copy()
-            # szf = sz.rolling(10, center=True).mean().interpolate().dropna()
-            # szf = sz.rolling(10, center=True).median().rolling(10, center=True).mean().interpolate().dropna()
-            # szf.plot(alpha=.5)
-
+            
             dfout[j]=x
 
         return dfout
