@@ -107,7 +107,7 @@ class PoseData:
 #create input (ts of keypoints) to train CNN
 def CNN_create_dataset(path, filename, direction, gaitrite):
 
-    joints = ['Left Toe', 'Right Toe', 'Left Heel', 'Right Heel', 'Left Ankle', 'Right Ankle']
+    joints = ['Left Toe', 'Right Toe', 'Left Heel', 'Right Heel', 'Left Ankle', 'Right Ankle', 'Left Knee', 'Right Knee']
 
     poses = PoseData(path, filename)
 
@@ -118,10 +118,17 @@ def CNN_create_dataset(path, filename, direction, gaitrite):
 
     #filter data
     Filter = FilterData()
-    ts = Filter.get_filterdata(poses,joints) #the filtered poses
+    ts = Filter.get_filterdata(poses,joints) #the filtered poses withouth confidence
+    # ts = Filter.get_normalized_data(poses, joints) #raw values with confidence
     ts.index-=ts.index[0] #reset time to start from 0 (boundary)
     if direction =='L':
         ts*=-1 #mirror time series if walking towards left
+
+    #additional features
+    #distance between L and R ankle
+    ts['LR_Ankle_dist'] = ts['Left Ankle'] - ts['Right Ankle']
+    ts['LR_Knee_dist'] = ts['Left Knee'] - ts['Right Knee']
+
     poses_filtered = poses
     poses_filtered.poses = ts
     poses_filtered.filtered = True
@@ -304,7 +311,9 @@ class AnalyzePoses:
             labels = axes[i*2+1].get_xticks()
 
             axes[i*2].set_title(j); axes[i*2+1].set_title(j+' filtered')
-
+            axes[i].set_xlabel('Time [s]'); axes[i*2+1].set_xlabel('Time [s]')
+            axes[i*2].set_ylabel('x-position [px]'); axes[i*2+1].set_ylabel('Normalized x-position [AU]')
+            
             if plot_spd is True:
                 spd = poses_filt[j].diff()
                 ax2 = axes[i*2+1].twinx()
@@ -335,6 +344,37 @@ class AnalyzePoses:
 class FilterData:
     def __init__(self, p_cutoff=0.3):
         self.p_cutoff = p_cutoff
+
+    def get_normalized_data(self, poses, joints=None):
+        df = poses.get_joint_data(joints)
+        df_cols = joints + ([j+'_conf' for j in joints])
+        dfout = pd.DataFrame(columns=df_cols)
+
+        for j in joints:
+            s = (df.loc[:,(j,['x','likelihood'])]).copy()
+            s.columns = s.columns.droplevel(0)
+            s.interpolate(inplace=True, method='linear')
+            s.dropna(inplace=True)
+            x = s.x #x-coord keypoint
+            conf = s.likelihood #keypoint confidence
+
+            #high pass filter
+            sos_filt = butter(8, 0.25, 'highpass', fs=30, output='sos')
+            x_filt = sosfiltfilt(sos_filt, x.values)
+            x_filt = pd.Series(data=x_filt, index=x.index)
+            x = x_filt.copy()
+
+            #zscore (this is just another rescaling between -1,1 really). Optionally try removing outliers
+            NZ = Normalizer()
+            x_filt_z = NZ.zscore(x)
+            x = x_filt_z.copy()
+
+            #assemble keypoint + confidence
+            dfout[j]=x
+            dfout[j+'_conf'] = conf
+        
+        return dfout
+        
 
     def get_filterdata(self, poses, joints=None):
         df = poses.get_joint_data(joints)
@@ -411,7 +451,9 @@ class DataLoader:
         T = self.posedata.get_duration()
         step = self.winsize - (self.overlap*self.winsize)
         for i in np.arange(0, T, step): 
+            # yield (self.posedata.get_joint_data(self.joints)[i: i+self.winsize], (i,i+self.winsize))
             yield self.posedata.get_joint_data(self.joints)[i: i+self.winsize]
+
 
 class FeatureExtractor:
     def __init__(self, dataloader, compute_fn=compute_features):
@@ -567,25 +609,31 @@ def gait_params(y, direction, plotdata=False):
 
     #DST
     DST = pd.DataFrame()
+    #L Double support
     Lhs = HSTO.loc[(HSTO.Side=='Left') & (HSTO.Event=='HS')].index
     Rto = HSTO.loc[(HSTO.Side=='Right') & (HSTO.Event=='TO')].index
     Lhs = np.sort(Lhs)
     Rto = np.sort(Rto)
-    Rto = Rto[Rto > Lhs[0]]
-    m = min(len(Rto),len(Lhs))
-    Lhs = Lhs[:m]; Rto = Rto[:m] #to match steps
-    DST_L = pd.concat((DST, pd.DataFrame({'DST':Rto-Lhs, 'Side':'Left'})), axis=0)
-    # DST_L = np.median(Rto - Lhs)
+    #match closest preceding HS with each TO
+    Rto_Lhs = []
+    for i in Rto:
+        indmin = np.argmin(np.abs(Lhs - i))
+        Rto_Lhs.append(np.array([i, Lhs[indmin]]))
+    Rto_Lhs = np.stack(Rto_Lhs, axis=0)
+    DST_L = pd.concat((DST, pd.DataFrame({'DST':Rto_Lhs[:,0] - Rto_Lhs[:,1], 'Side':'Left'})), axis=0)
+   #R Double support
     Rhs = HSTO.loc[(HSTO.Side=='Right') & (HSTO.Event=='HS')].index
     Lto = HSTO.loc[(HSTO.Side=='Left') & (HSTO.Event=='TO')].index
     Rhs = np.sort(Rhs)
     Lto = np.sort(Lto)
-    Lto = Lto[Lto > Rhs[0]]
-    m = min(len(Lto),len(Rhs))
-    Lto = Lto[:m]; Rhs = Rhs[:m] #to match steps
-    DST_R = pd.concat((DST, pd.DataFrame({'DST':Lto-Rhs, 'Side':'Right'})), axis=0)
+    #match closest preceding HS with each TO
+    Lto_Rhs = []
+    for i in Lto:
+        indmin = np.argmin(np.abs(Rhs - i))
+        Lto_Rhs.append(np.array([i, Rhs[indmin]]))
+    Lto_Rhs = np.stack(Lto_Rhs, axis=0)
+    DST_R = pd.concat((DST, pd.DataFrame({'DST':Lto_Rhs[:,0] - Lto_Rhs[:,1], 'Side':'Right'})), axis=0)
     DST = (DST_L.DST + DST_R.DST).median()
-    # gait_par['DST'] = DST.median().values[0]
     gait_par['DST'] = DST
 
     #cadence - we can use autocorrelation or count steps
